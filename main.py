@@ -1,209 +1,170 @@
-import logging
-import random
-import sqlite3
-from datetime import datetime, timedelta
-
+import logging, sqlite3, random, string
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = "8241969129:AAE2amllaL22t0Xb2PwS1GFg2AXtTd9GS3E"
-ADMIN_ID = 6050668835
+TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_ID = 123456789
 
 logging.basicConfig(level=logging.INFO)
-
-bot = Bot(token=TOKEN, parse_mode="HTML")
+bot = Bot(TOKEN)
 dp = Dispatcher(bot)
 
-# ================= DATABASE =================
-conn = sqlite3.connect("bot.db")
-c = conn.cursor()
+db = sqlite3.connect("bot.db")
+cur = db.cursor()
 
-c.execute("""
+cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    balance INTEGER DEFAULT 0,
-    total_deposit INTEGER DEFAULT 0,
-    checkin_days INTEGER DEFAULT 0,
-    last_checkin TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS bank (
     id INTEGER PRIMARY KEY,
-    name TEXT,
-    stk TEXT,
-    ctk TEXT,
-    content TEXT
+    balance INTEGER DEFAULT 0,
+    ref INTEGER DEFAULT 0,
+    invite INTEGER DEFAULT 0
 )
 """)
 
-c.execute("""
+cur.execute("""
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY,
+    deposit INTEGER DEFAULT 0,
+    invite INTEGER DEFAULT 0,
+    withdraw INTEGER DEFAULT 0
+)
+""")
+
+cur.execute("""
 CREATE TABLE IF NOT EXISTS giftcode (
     code TEXT PRIMARY KEY,
-    used INTEGER DEFAULT 0
+    value INTEGER
 )
 """)
 
-conn.commit()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS pending (
+    id INTEGER,
+    type TEXT,
+    amount INTEGER
+)
+""")
 
+db.commit()
 
-# ================= KEYBOARD =================
-
-def main_menu():
+def menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("💰 Nạp tiền", callback_data="nap"),
-        InlineKeyboardButton("💸 Rút tiền", callback_data="rut"),
-        InlineKeyboardButton("🎯 Nhiệm vụ", callback_data="nhiemvu"),
-        InlineKeyboardButton("🏆 Đua top", callback_data="duatop"),
-        InlineKeyboardButton("🎁 Sự kiện", callback_data="sukien"),
-        InlineKeyboardButton("📅 Điểm danh", callback_data="checkin"),
-        InlineKeyboardButton("💼 Số dư", callback_data="sodu"),
-        InlineKeyboardButton("☎ CSKH", callback_data="cskh"),
-        InlineKeyboardButton("🎟 Nhập Giftcode", callback_data="gift")
+        InlineKeyboardButton("💰 Nạp", callback_data="deposit"),
+        InlineKeyboardButton("🏧 Rút", callback_data="withdraw"),
+        InlineKeyboardButton("🎯 Nhiệm vụ", callback_data="task"),
+        InlineKeyboardButton("🎉 Sự kiện", callback_data="event"),
+        InlineKeyboardButton("👥 Mời bạn", callback_data="invite"),
+        InlineKeyboardButton("🏆 BXH", callback_data="top"),
+        InlineKeyboardButton("🎁 Giftcode", callback_data="gift")
     )
     return kb
-
-
-def admin_menu():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📥 Duyệt nạp", callback_data="ad_nap"),
-        InlineKeyboardButton("📤 Duyệt rút", callback_data="ad_rut"),
-        InlineKeyboardButton("🏦 Cập nhật ngân hàng", callback_data="ad_bank")
-    )
-    return kb
-
-
-# ================= HANDLER =================
 
 @dp.message_handler(commands=['start'])
-async def start(msg: types.Message):
-    c.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (msg.from_user.id,))
-    conn.commit()
+async def start(m: types.Message):
+    uid = m.from_user.id
+    ref = m.get_args()
+    cur.execute("INSERT OR IGNORE INTO users(id, ref) VALUES(?,?)",(uid, ref if ref else 0))
+    cur.execute("INSERT OR IGNORE INTO tasks(id) VALUES(?)",(uid,))
+    if ref and int(ref)!=uid:
+        cur.execute("UPDATE users SET invite = invite+1 WHERE id=?",(ref,))
+    db.commit()
+    await m.answer("🤖 BOT KIẾM TIỀN", reply_markup=menu())
 
-    text = (
-        "🎉 <b>CHÀO MỪNG BẠN ĐẾN HỆ THỐNG KIẾM TIỀN TỰ ĐỘNG 24/7</b>\n\n"
-        "💎 Nền tảng tài chính số minh bạch – uy tín – an toàn tuyệt đối.\n"
-        "⚡ Nạp rút nhanh – nhiệm vụ hấp dẫn – thưởng mỗi ngày.\n\n"
-        "👇 Vui lòng lựa chọn chức năng bên dưới:"
+@dp.callback_query_handler(text="deposit")
+async def deposit(c: types.CallbackQuery):
+    await c.message.answer("💰 Nhập số tiền cần nạp:")
+    await c.answer()
+
+@dp.callback_query_handler(text="withdraw")
+async def withdraw(c: types.CallbackQuery):
+    await c.message.answer("🏧 Nhập số tiền cần rút:")
+    await c.answer()
+
+@dp.callback_query_handler(text="invite")
+async def invite(c: types.CallbackQuery):
+    link = f"https://t.me/{(await bot.get_me()).username}?start={c.from_user.id}"
+    await c.message.answer(f"👥 Link mời bạn:\n{link}")
+    await c.answer()
+
+@dp.callback_query_handler(text="event")
+async def event(c: types.CallbackQuery):
+    kb = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("🔥 Tham gia", callback_data="join_event")
     )
-    await msg.answer(text, reply_markup=main_menu())
+    await c.message.answer("🎉 SỰ KIỆN HOT:\n- Mời 3 người = 99k\n- Top nạp thưởng lớn", reply_markup=kb)
+    await c.answer()
 
-    if msg.from_user.id == ADMIN_ID:
-        await msg.answer("🔐 <b>ADMIN PANEL</b>", reply_markup=admin_menu())
+@dp.callback_query_handler(text="join_event")
+async def join_event(c: types.CallbackQuery):
+    await c.message.answer("✅ Đã tham gia sự kiện!")
+    await c.answer()
 
+@dp.callback_query_handler(text="task")
+async def task(c: types.CallbackQuery):
+    cur.execute("SELECT * FROM tasks WHERE id=?",(c.from_user.id,))
+    t = cur.fetchone()
+    text = f"""
+🎯 NHIỆM VỤ NGÀY
+Nạp: {t[1]}/1 (+30%)
+Mời: {t[2]}/3 (+50k)
+Rút: {t[3]}/1 (+15k)
+"""
+    await c.message.answer(text)
+    await c.answer()
 
-# ================= SỐ DƯ =================
+@dp.callback_query_handler(text="top")
+async def top(c: types.CallbackQuery):
+    cur.execute("SELECT id,invite FROM users ORDER BY invite DESC LIMIT 10")
+    data = cur.fetchall()
+    text="🏆 TOP MỜI\n"
+    for i,u in enumerate(data,1):
+        text+=f"{i}. {u[0]} | {u[1]}\n"
+    await c.message.answer(text)
+    await c.answer()
 
-@dp.callback_query_handler(lambda c: c.data == "sodu")
-async def sodu(call: types.CallbackQuery):
-    c.execute("SELECT balance, total_deposit FROM users WHERE user_id=?", (call.from_user.id,))
-    bal, total = c.fetchone()
+@dp.callback_query_handler(text="gift")
+async def gift(c: types.CallbackQuery):
+    await c.message.answer("🎁 Nhập giftcode:")
+    await c.answer()
 
-    text = (
-        "💼 <b>THÔNG TIN TÀI KHOẢN</b>\n\n"
-        f"💰 Số dư hiện tại: <b>{bal:,}đ</b>\n"
-        f"📊 Tổng nạp: <b>{total:,}đ</b>\n\n"
-        "📌 Mọi giao dịch đều được lưu trữ minh bạch."
-    )
-    await call.message.edit_text(text, reply_markup=main_menu())
-
-
-# ================= ĐIỂM DANH =================
-
-@dp.callback_query_handler(lambda c: c.data == "checkin")
-async def checkin(call: types.CallbackQuery):
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    c.execute("SELECT last_checkin, checkin_days FROM users WHERE user_id=?", (call.from_user.id,))
-    last, days = c.fetchone()
-
-    if last == today:
-        await call.answer("Hôm nay bạn đã điểm danh rồi!", show_alert=True)
-        return
-
-    if last == (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"):
-        days += 1
-    else:
-        days = 1
-
-    reward = random.randint(1000, 10000)
-    if days == 7:
-        reward += 100000
-    if days == 30:
-        reward += 3000000
-
-    c.execute("""
-    UPDATE users SET balance = balance + ?, last_checkin=?, checkin_days=?
-    WHERE user_id=?
-    """, (reward, today, days, call.from_user.id))
-    conn.commit()
-
-    await call.message.edit_text(
-        f"🎉 <b>ĐIỂM DANH THÀNH CÔNG</b>\n\n"
-        f"🎁 Bạn nhận được: <b>{reward:,}đ</b>\n"
-        f"🔥 Chuỗi liên tiếp: <b>{days} ngày</b>",
-        reply_markup=main_menu()
-    )
-
-
-# ================= CSKH =================
-
-@dp.callback_query_handler(lambda c: c.data == "cskh")
-async def cskh(call: types.CallbackQuery):
+@dp.message_handler(commands=['admin'])
+async def admin(m: types.Message):
+    if m.from_user.id!=ADMIN_ID: return
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("💰 Nạp tiền", callback_data="nap"),
-        InlineKeyboardButton("💸 Rút tiền", callback_data="rut"),
-        InlineKeyboardButton("🎟 Giftcode", callback_data="gift"),
-        InlineKeyboardButton("👨‍💻 Liên hệ CSKH", url="https://t.me/cskhmnm")
+        InlineKeyboardButton("✔ Duyệt nạp", callback_data="ad_deposit"),
+        InlineKeyboardButton("✔ Duyệt rút", callback_data="ad_withdraw"),
+        InlineKeyboardButton("🎁 Tạo code", callback_data="ad_code"),
+        InlineKeyboardButton("🏦 Ngân hàng", callback_data="bank")
     )
+    await m.answer("👑 ADMIN PANEL", reply_markup=kb)
 
-    text = (
-        "☎ <b>TRUNG TÂM CHĂM SÓC KHÁCH HÀNG 24/7</b>\n\n"
-        "🔹 Hỗ trợ nạp – rút – xử lý lỗi – giftcode.\n"
-        "🔹 Phản hồi nhanh – hỗ trợ tận tâm.\n\n"
-        "👇 Vui lòng chọn nội dung cần hỗ trợ:"
-    )
-    await call.message.edit_text(text, reply_markup=kb)
+@dp.callback_query_handler(text="ad_code")
+async def create_code(c: types.CallbackQuery):
+    code=''.join(random.choices(string.ascii_uppercase+string.digits,k=8))
+    cur.execute("INSERT INTO giftcode VALUES(?,?)",(code,50000))
+    db.commit()
+    await c.message.answer(f"🎁 Code: {code} | 50k")
 
-
-# ================= GIFT CODE =================
-
-@dp.callback_query_handler(lambda c: c.data == "gift")
-async def gift(call: types.CallbackQuery):
-    await call.message.edit_text("🎟 <b>Vui lòng nhập Giftcode:</b>")
-
-
-@dp.message_handler(lambda m: len(m.text) <= 20)
-async def gift_input(msg: types.Message):
-    code = msg.text.strip()
-
-    c.execute("SELECT used FROM giftcode WHERE code=?", (code,))
-    row = c.fetchone()
-
-    if not row:
+@dp.message_handler()
+async def input_handler(m: types.Message):
+    uid = m.from_user.id
+    txt = m.text.strip()
+    if txt.isdigit():
+        amount=int(txt)
+        cur.execute("INSERT INTO pending VALUES(?,?,?)",(uid,'deposit',amount))
+        db.commit()
+        await m.answer("⏳ Chờ admin duyệt nạp")
+        await bot.send_message(ADMIN_ID,f"📥 NẠP\nUser: {uid}\nSố tiền: {amount}")
         return
+    cur.execute("SELECT value FROM giftcode WHERE code=?",(txt,))
+    g=cur.fetchone()
+    if g:
+        cur.execute("UPDATE users SET balance=balance+? WHERE id=?",(g[0],uid))
+        cur.execute("DELETE FROM giftcode WHERE code=?",(txt,))
+        db.commit()
+        await m.answer(f"✅ Nhận {g[0]} VND")
 
-    if row[0] == 1:
-        await msg.answer("❌ Giftcode đã được sử dụng!")
-        return
-
-    reward = random.randint(8000, 88000)
-    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (reward, msg.from_user.id))
-    c.execute("UPDATE giftcode SET used=1 WHERE code=?", (code,))
-    conn.commit()
-
-    await msg.answer(f"🎉 Nhận thành công <b>{reward:,}đ</b>", reply_markup=main_menu())
-
-
-# ================= NẠP – RÚT – NHIỆM VỤ – SỰ KIỆN – ĐUA TOP =================
-# Đã dựng khung đầy đủ, không treo nút, admin duyệt qua callback.
-# (Nếu mày cần tao triển khai FULL luồng từng phần thì nói – tao code tiếp phần chi tiết)
-
-# ================= RUN =================
-
-if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+if __name__=="__main__":
+    executor.start_polling(dp)
