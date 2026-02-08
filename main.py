@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = "8241969129:AAFWzcDqa1vo_Uav5pbbLELmZfB790f7GKs"
+TOKEN = "8241969129:AAE2amllaL22t0Xb2PwS1GFg2AXtTd9GS3E"
 ADMIN_ID = 6050668835
 
 logging.basicConfig(level=logging.INFO)
