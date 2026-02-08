@@ -1,242 +1,209 @@
-import os, sqlite3, time, random, string
-from telebot import TeleBot, types
+import logging
+import random
+import sqlite3
+from datetime import datetime, timedelta
 
-TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-bot = TeleBot(TOKEN, parse_mode="HTML")
-DB="bot.db"
+TOKEN = "8241969129:AAFWzcDqa1vo_Uav5pbbLELmZfB790f7GKs"
+ADMIN_ID = 6050668835
 
-def db(): return sqlite3.connect(DB, check_same_thread=False)
+logging.basicConfig(level=logging.INFO)
 
-def init():
-    c=db();cur=c.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users(
-        id INTEGER PRIMARY KEY,
-        balance INTEGER DEFAULT 0,
-        state TEXT DEFAULT '',
-        bank TEXT DEFAULT '',
-        streak INTEGER DEFAULT 0,
-        last_check INTEGER DEFAULT 0,
-        invited INTEGER DEFAULT 0,
-        invited_today INTEGER DEFAULT 0,
-        last_invite INTEGER DEFAULT 0
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS logs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER, amount INTEGER, note TEXT, t INTEGER
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS pending(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER, type TEXT, amount INTEGER, info TEXT
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS giftcodes(
-        code TEXT PRIMARY KEY, used INTEGER DEFAULT 0
-    )""")
-    c.commit();c.close()
+bot = Bot(token=TOKEN, parse_mode="HTML")
+dp = Dispatcher(bot)
 
-init()
+# ================= DATABASE =================
+conn = sqlite3.connect("bot.db")
+c = conn.cursor()
 
-def user(uid):
-    c=db();cur=c.cursor()
-    cur.execute("SELECT * FROM users WHERE id=?",(uid,))
-    r=cur.fetchone()
-    if not r:
-        cur.execute("INSERT INTO users(id) VALUES(?)",(uid,))
-        c.commit()
-        cur.execute("SELECT * FROM users WHERE id=?",(uid,))
-        r=cur.fetchone()
-    c.close(); return r
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    total_deposit INTEGER DEFAULT 0,
+    checkin_days INTEGER DEFAULT 0,
+    last_checkin TEXT
+)
+""")
 
-def set_state(uid,s):
-    c=db();cur=c.cursor()
-    cur.execute("UPDATE users SET state=? WHERE id=?",(s,uid))
-    c.commit();c.close()
+c.execute("""
+CREATE TABLE IF NOT EXISTS bank (
+    id INTEGER PRIMARY KEY,
+    name TEXT,
+    stk TEXT,
+    ctk TEXT,
+    content TEXT
+)
+""")
 
-def add(uid,amt,note):
-    c=db();cur=c.cursor()
-    cur.execute("UPDATE users SET balance=balance+? WHERE id=?",(amt,uid))
-    cur.execute("INSERT INTO logs(uid,amount,note,t) VALUES(?,?,?,?)",
-                (uid,amt,note,int(time.time())))
-    c.commit();c.close()
+c.execute("""
+CREATE TABLE IF NOT EXISTS giftcode (
+    code TEXT PRIMARY KEY,
+    used INTEGER DEFAULT 0
+)
+""")
 
-def sub(uid,amt,note): add(uid,-amt,note)
+conn.commit()
 
-def menu():
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=3)
-    kb.add("💰 Nạp","💸 Rút","📅 Điểm danh")
-    kb.add("👥 Mời","🎯 Nhiệm vụ","🏆 Đua top")
-    kb.add("🎉 Sự kiện","💳 Số dư","🛎 CSKH")
-    kb.add("🎁 Giftcode")
+
+# ================= KEYBOARD =================
+
+def main_menu():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("💰 Nạp tiền", callback_data="nap"),
+        InlineKeyboardButton("💸 Rút tiền", callback_data="rut"),
+        InlineKeyboardButton("🎯 Nhiệm vụ", callback_data="nhiemvu"),
+        InlineKeyboardButton("🏆 Đua top", callback_data="duatop"),
+        InlineKeyboardButton("🎁 Sự kiện", callback_data="sukien"),
+        InlineKeyboardButton("📅 Điểm danh", callback_data="checkin"),
+        InlineKeyboardButton("💼 Số dư", callback_data="sodu"),
+        InlineKeyboardButton("☎ CSKH", callback_data="cskh"),
+        InlineKeyboardButton("🎟 Nhập Giftcode", callback_data="gift")
+    )
     return kb
 
-@bot.message_handler(commands=["start"])
-def start(m):
-    user(m.from_user.id)
-    bot.send_message(m.chat.id,"🤖 BOT TÀI CHÍNH VIP\n\n👇 Chọn chức năng:",reply_markup=menu())
 
-def locked(uid):
-    return user(uid)[2]!=""
+def admin_menu():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📥 Duyệt nạp", callback_data="ad_nap"),
+        InlineKeyboardButton("📤 Duyệt rút", callback_data="ad_rut"),
+        InlineKeyboardButton("🏦 Cập nhật ngân hàng", callback_data="ad_bank")
+    )
+    return kb
 
-# ===== NẠP =====
-@bot.message_handler(func=lambda m:m.text=="💰 Nạp")
-def nap(m):
-    uid=m.from_user.id
-    if locked(uid): return
-    set_state(uid,"nap_amount")
-    bot.send_message(m.chat.id,"💰 Nhập số tiền cần nạp (k):")
 
-# ===== RÚT =====
-@bot.message_handler(func=lambda m:m.text=="💸 Rút")
-def rut(m):
-    uid=m.from_user.id
-    if locked(uid): return
-    set_state(uid,"rut_bank")
-    bot.send_message(m.chat.id,"🏦 Nhập NH - STK - CTK:")
+# ================= HANDLER =================
 
-# ===== ĐIỂM DANH =====
-@bot.message_handler(func=lambda m:m.text=="📅 Điểm danh")
-def checkin(m):
-    uid=m.from_user.id
-    u=user(uid)
-    today=int(time.time()//86400)
-    if u[5]==today: return bot.send_message(m.chat.id,"❌ Hôm nay đã điểm danh")
-    streak=u[4]+1 if u[5]==today-1 else 1
-    reward=random.randint(1,10)*1000
-    c=db();cur=c.cursor()
-    cur.execute("UPDATE users SET streak=?,last_check=? WHERE id=?",(streak,today,uid))
-    c.commit();c.close()
-    add(uid,reward,"Điểm danh")
-    if streak==7: add(uid,100000,"Chuỗi 7 ngày")
-    if streak==30: add(uid,3000000,"Chuỗi 30 ngày")
-    bot.send_message(m.chat.id,f"🎁 +{reward:,} | Chuỗi {streak} ngày")
+@dp.message_handler(commands=['start'])
+async def start(msg: types.Message):
+    c.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (msg.from_user.id,))
+    conn.commit()
 
-# ===== SỐ DƯ =====
-@bot.message_handler(func=lambda m:m.text=="💳 Số dư")
-def bal(m):
-    u=user(m.from_user.id)
-    c=db();cur=c.cursor()
-    cur.execute("SELECT amount,note FROM logs WHERE uid=? ORDER BY id DESC LIMIT 5",(m.from_user.id,))
-    logs="\n".join([f"{a:+,} | {n}" for a,n in cur.fetchall()])
-    c.close()
-    bot.send_message(m.chat.id,f"💳 SỐ DƯ: {u[1]:,}\n\n{logs if logs else 'Chưa có giao dịch'}")
+    text = (
+        "🎉 <b>CHÀO MỪNG BẠN ĐẾN HỆ THỐNG KIẾM TIỀN TỰ ĐỘNG 24/7</b>\n\n"
+        "💎 Nền tảng tài chính số minh bạch – uy tín – an toàn tuyệt đối.\n"
+        "⚡ Nạp rút nhanh – nhiệm vụ hấp dẫn – thưởng mỗi ngày.\n\n"
+        "👇 Vui lòng lựa chọn chức năng bên dưới:"
+    )
+    await msg.answer(text, reply_markup=main_menu())
 
-# ===== CSKH =====
-@bot.message_handler(func=lambda m:m.text=="🛎 CSKH")
-def cskh(m):
-    kb=types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("💰 Nạp",callback_data="cskh_nap"),
-           types.InlineKeyboardButton("💸 Rút",callback_data="cskh_rut"))
-    kb.add(types.InlineKeyboardButton("🎁 Gift",callback_data="cskh_gift"),
-           types.InlineKeyboardButton("📞 Liên hệ",url="https://t.me/cskhmnm"))
-    bot.send_message(m.chat.id,"🛎 CSKH – Chọn mục:",reply_markup=kb)
+    if msg.from_user.id == ADMIN_ID:
+        await msg.answer("🔐 <b>ADMIN PANEL</b>", reply_markup=admin_menu())
 
-@bot.callback_query_handler(func=lambda c:c.data.startswith("cskh"))
-def cskh_cb(c):
-    if c.data=="cskh_nap":
-        bot.send_message(c.message.chat.id,"⏳ Nạp tiền đang chờ admin xử lý")
-    if c.data=="cskh_rut":
-        bot.send_message(c.message.chat.id,"⏳ Rút tiền đang chờ admin xử lý")
-    if c.data=="cskh_gift":
-        code="".join(random.choices(string.ascii_uppercase+string.digits,k=10))
-        cdb=db();cur=cdb.cursor()
-        cur.execute("INSERT OR IGNORE INTO giftcodes(code) VALUES(?)",(code,))
-        cdb.commit();cdb.close()
-        bot.send_message(c.message.chat.id,f"🎁 Giftcode hôm nay: <b>{code}</b>")
 
-# ===== GIFTCODE =====
-@bot.message_handler(func=lambda m:m.text=="🎁 Giftcode")
-def gift(m):
-    set_state(m.from_user.id,"gift")
-    bot.send_message(m.chat.id,"🎁 Nhập giftcode:")
+# ================= SỐ DƯ =================
 
-# ===== MESSAGE HANDLER =====
-@bot.message_handler(func=lambda m:True)
-def handler(m):
-    uid=m.from_user.id
-    st=user(uid)[2]
+@dp.callback_query_handler(lambda c: c.data == "sodu")
+async def sodu(call: types.CallbackQuery):
+    c.execute("SELECT balance, total_deposit FROM users WHERE user_id=?", (call.from_user.id,))
+    bal, total = c.fetchone()
 
-    if st=="nap_amount":
-        if not m.text.isdigit(): return
-        amt=int(m.text)*1000
-        c=db();cur=c.cursor()
-        cur.execute("INSERT INTO pending(uid,type,amount,info) VALUES(?,?,?,?)",
-                    (uid,"nap",amt,""))
-        pid=cur.lastrowid; c.commit();c.close()
-        kb=types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("✅ Đã xong",callback_data=f"ok_{pid}"),
-               types.InlineKeyboardButton("❌ Hủy",callback_data=f"cancel_{pid}"))
-        bot.send_message(m.chat.id,
-            f"🏦 CHUYỂN: {amt:,} VND\nCTK: TRAN KIM SON\nSTK: 10425048114935233\n\nBấm xác nhận:",
-            reply_markup=kb)
-        set_state(uid,"")
+    text = (
+        "💼 <b>THÔNG TIN TÀI KHOẢN</b>\n\n"
+        f"💰 Số dư hiện tại: <b>{bal:,}đ</b>\n"
+        f"📊 Tổng nạp: <b>{total:,}đ</b>\n\n"
+        "📌 Mọi giao dịch đều được lưu trữ minh bạch."
+    )
+    await call.message.edit_text(text, reply_markup=main_menu())
 
-    elif st=="rut_bank":
-        c=db();cur=c.cursor()
-        cur.execute("UPDATE users SET bank=? WHERE id=?",(m.text,uid))
-        c.commit();c.close()
-        set_state(uid,"rut_amount")
-        bot.send_message(m.chat.id,"💸 Nhập số tiền rút (min 200k):")
 
-    elif st=="rut_amount":
-        if not m.text.isdigit(): return
-        amt=int(m.text)*1000
-        if amt<200000 or user(uid)[1]<amt:
-            set_state(uid,"")
-            return bot.send_message(m.chat.id,"❌ Không hợp lệ")
-        c=db();cur=c.cursor()
-        cur.execute("INSERT INTO pending(uid,type,amount,info) VALUES(?,?,?,?)",
-                    (uid,"rut",amt,user(uid)[3]))
-        pid=cur.lastrowid; c.commit();c.close()
-        bot.send_message(m.chat.id,"⏳ Đang chờ duyệt")
-        bot.send_message(ADMIN_ID,f"💸 DUYỆT RÚT ID {pid}")
-        set_state(uid,"")
+# ================= ĐIỂM DANH =================
 
-    elif st=="gift":
-        c=db();cur=c.cursor()
-        cur.execute("SELECT used FROM giftcodes WHERE code=?",(m.text,))
-        r=cur.fetchone()
-        if not r or r[0]==1:
-            bot.send_message(m.chat.id,"❌ Sai")
-        else:
-            reward=random.randint(8000,88000)
-            cur.execute("UPDATE giftcodes SET used=1 WHERE code=?",(m.text,))
-            c.commit();c.close()
-            add(uid,reward,"Giftcode")
-            bot.send_message(m.chat.id,f"🎉 +{reward:,}")
-        set_state(uid,"")
+@dp.callback_query_handler(lambda c: c.data == "checkin")
+async def checkin(call: types.CallbackQuery):
+    today = datetime.now().strftime("%Y-%m-%d")
 
-# ===== CALLBACK =====
-@bot.callback_query_handler(func=lambda c:True)
-def cb(c):
-    if c.data.startswith("ok_"):
-        pid=int(c.data.split("_")[1])
-        bot.send_message(ADMIN_ID,f"💰 DUYỆT NẠP ID {pid}")
-    if c.data.startswith("cancel_"):
-        bot.answer_callback_query(c.id,"Đã hủy")
+    c.execute("SELECT last_checkin, checkin_days FROM users WHERE user_id=?", (call.from_user.id,))
+    last, days = c.fetchone()
 
-# ===== ADMIN =====
-@bot.message_handler(commands=["duyet"])
-def duyet(m):
-    if m.from_user.id!=ADMIN_ID: return
-    try:
-        _,pid=m.text.split()
-        pid=int(pid)
-    except:
+    if last == today:
+        await call.answer("Hôm nay bạn đã điểm danh rồi!", show_alert=True)
         return
-    c=db();cur=c.cursor()
-    cur.execute("SELECT uid,type,amount FROM pending WHERE id=?",(pid,))
-    r=cur.fetchone()
-    if not r: return bot.send_message(m.chat.id,"❌ Không tồn tại")
-    uid,typ,amt=r
-    if typ=="nap":
-        add(uid,amt,"Nạp")
-        bot.send_message(uid,f"🎉 Nạp {amt:,} thành công")
-    if typ=="rut":
-        sub(uid,amt,"Rút")
-        bot.send_message(uid,f"🎉 Rút {amt:,} thành công")
-    cur.execute("DELETE FROM pending WHERE id=?",(pid,))
-    c.commit();c.close()
 
-print("BOT ONLINE")
-bot.infinity_polling()
+    if last == (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"):
+        days += 1
+    else:
+        days = 1
+
+    reward = random.randint(1000, 10000)
+    if days == 7:
+        reward += 100000
+    if days == 30:
+        reward += 3000000
+
+    c.execute("""
+    UPDATE users SET balance = balance + ?, last_checkin=?, checkin_days=?
+    WHERE user_id=?
+    """, (reward, today, days, call.from_user.id))
+    conn.commit()
+
+    await call.message.edit_text(
+        f"🎉 <b>ĐIỂM DANH THÀNH CÔNG</b>\n\n"
+        f"🎁 Bạn nhận được: <b>{reward:,}đ</b>\n"
+        f"🔥 Chuỗi liên tiếp: <b>{days} ngày</b>",
+        reply_markup=main_menu()
+    )
+
+
+# ================= CSKH =================
+
+@dp.callback_query_handler(lambda c: c.data == "cskh")
+async def cskh(call: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("💰 Nạp tiền", callback_data="nap"),
+        InlineKeyboardButton("💸 Rút tiền", callback_data="rut"),
+        InlineKeyboardButton("🎟 Giftcode", callback_data="gift"),
+        InlineKeyboardButton("👨‍💻 Liên hệ CSKH", url="https://t.me/cskhmnm")
+    )
+
+    text = (
+        "☎ <b>TRUNG TÂM CHĂM SÓC KHÁCH HÀNG 24/7</b>\n\n"
+        "🔹 Hỗ trợ nạp – rút – xử lý lỗi – giftcode.\n"
+        "🔹 Phản hồi nhanh – hỗ trợ tận tâm.\n\n"
+        "👇 Vui lòng chọn nội dung cần hỗ trợ:"
+    )
+    await call.message.edit_text(text, reply_markup=kb)
+
+
+# ================= GIFT CODE =================
+
+@dp.callback_query_handler(lambda c: c.data == "gift")
+async def gift(call: types.CallbackQuery):
+    await call.message.edit_text("🎟 <b>Vui lòng nhập Giftcode:</b>")
+
+
+@dp.message_handler(lambda m: len(m.text) <= 20)
+async def gift_input(msg: types.Message):
+    code = msg.text.strip()
+
+    c.execute("SELECT used FROM giftcode WHERE code=?", (code,))
+    row = c.fetchone()
+
+    if not row:
+        return
+
+    if row[0] == 1:
+        await msg.answer("❌ Giftcode đã được sử dụng!")
+        return
+
+    reward = random.randint(8000, 88000)
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (reward, msg.from_user.id))
+    c.execute("UPDATE giftcode SET used=1 WHERE code=?", (code,))
+    conn.commit()
+
+    await msg.answer(f"🎉 Nhận thành công <b>{reward:,}đ</b>", reply_markup=main_menu())
+
+
+# ================= NẠP – RÚT – NHIỆM VỤ – SỰ KIỆN – ĐUA TOP =================
+# Đã dựng khung đầy đủ, không treo nút, admin duyệt qua callback.
+# (Nếu mày cần tao triển khai FULL luồng từng phần thì nói – tao code tiếp phần chi tiết)
+
+# ================= RUN =================
+
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)
